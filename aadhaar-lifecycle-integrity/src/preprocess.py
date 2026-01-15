@@ -299,11 +299,7 @@ def validate_geographic_consistency(
         - updates_only: Locations only in update data (potential anomaly)
     """
     def get_locations(df):
-        return set(
-            df[["state", "district", "pincode"]]
-            .apply(tuple, axis=1)
-            .unique()
-        )
+        return set(zip(df["state"], df["district"], df["pincode"]))
     
     enrol_locs = get_locations(enrolment_df)
     bio_locs = get_locations(biometric_df)

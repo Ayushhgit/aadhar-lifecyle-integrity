@@ -1,0 +1,29 @@
+
+AADHAAR LIFECYCLE INTEGRITY DIAGNOSTIC REPORT (2025)
+====================================================
+
+1. ISI FINDINGS (Cross-Sectional Identity Staleness Index)
+----------------------------------------------------------
+The 2025 administrative year is characterized by specific structural flow patterns:
+
+*   **Dominance of 'Catch-up' Zones**: 957 districts exhibit update volumes exceeding their 
+    entry cohort pressure (ISI < 0). This indicates active backlog clearance or high campaign efficacy, 
+    structurally outperforming the baseline entry maintenance requirement.
+
+*   **Critical Lag**: 6 districts remain in the Critical or Infrastructure Gap zone. 
+    In these locations, maintenance volume is severely disconnected from entry pressure, suggesting 
+    potential infrastructure accessibility constraints rather than resident non-compliance.
+
+2. JOINT DIAGNOSTIC (ISI x DUV)
+-------------------------------
+*   **System State**: The vast majority (877/972) of districts classify as 
+    "Digitally Engaged & Balanced". This quadrant represents a healthy system state where 
+    biometric maintenance keeps pace with entry pressure (Low ISI) and the population 
+    remains administratively active (High DUV).
+
+*   **Friction Zones**: The small number of districts in the "High-Engagement, High-Friction" 
+    quadrant suggests areas where the population is digitally active (updating mobile/address) 
+    but facing specific bottlenecks in completing mandatory biometric updates.
+
+Note: All diagnostics are derived from system throughput ratios. 
+No individual resident behavior or migration is inferred.
