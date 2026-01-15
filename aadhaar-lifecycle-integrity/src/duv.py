@@ -1,253 +1,153 @@
 """
-Data Update Velocity (DUV) computation module.
+Demographic Update Velocity (DUV) Computation Module.
+
+Core Metric:
+-----------
+Demographic Update Velocity (DUV)
+
+Quantifies the rate of non-biometric maintenance (Address + Mobile updates)
+relative to the enrolled population. This serves as a proxy for "Digital Engagement"
+or "Administrative Activity" independent of biometric requirements.
+
+Formulation:
+-----------
+DUV = (Address Updates + Mobile Updates) / Total Enrolled Population
+
+Interpretation:
+--------------
+- High DUV: Active digital engagement / frequent administrative changes.
+- Low DUV: Stable population / Dormant system interaction.
+
+Usage:
+-----
+Strictly a contextual signal to interpret ISI patterns.
+NOT a measure of migration or residency change.
+
+Author: Principal Data Scientist
+Constraints: Government-grade, policy-safe, deterministic, aggregated only.
 """
 
 import pandas as pd
 import numpy as np
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, Optional
 import logging
-
-from . import config
 
 logger = logging.getLogger(__name__)
 
 
-def compute_update_velocity(
-    updates_df: pd.DataFrame,
-    date_column: str = "update_date",
-    window_days: int = None
-) -> pd.DataFrame:
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+# Minimum population denominator to avoid noise
+MIN_POPULATION_THRESHOLD = 50 
+
+
+@dataclass
+class DUVResult:
+    """Container for DUV computation results."""
+    data: pd.DataFrame
+    metadata: Dict
+    
+    def __str__(self) -> str:
+        mean_duv = self.data["duv_score"].mean() if not self.data.empty else 0
+        return f"DUVResult(rows={len(self.data)}, mean_score={mean_duv:.3f})"
+
+
+# =============================================================================
+# COMPUTATION LOGIC
+# =============================================================================
+
+def compute_duv(
+    demographic_updates_df: pd.DataFrame,
+    enrolment_df: pd.DataFrame,
+    target_year: int = 2025,
+    match_levels: list = ["state", "district"]
+) -> DUVResult:
     """
-    Compute update velocity (updates per time period).
+    Compute Demographic Update Velocity.
     
     Parameters
     ----------
-    updates_df : pd.DataFrame
-        Updates data.
-    date_column : str
-        Name of the date column.
-    window_days : int, optional
-        Rolling window size in days.
+    demographic_updates_df : pd.DataFrame
+        Yearly aggregated demographic updates (from preprocess).
+    enrolment_df : pd.DataFrame
+        Yearly aggregated enrolment data (from preprocess).
+    target_year : int
+        Year to analyze.
+    match_levels : list
+        Geographic columns to join on (e.g., ['state', 'district']).
         
     Returns
     -------
-    pd.DataFrame
-        Velocity metrics per Aadhaar number.
+    DUVResult
+         DataFrame with 'duv_score' and metadata.
     """
-    if window_days is None:
-        window_days = config.DUV_WINDOW_DAYS
+    logger.info(f"Computing DUV for year {target_year} at {match_levels} level...")
     
-    df = updates_df.copy()
-    df = df.sort_values(date_column)
+    # 1. Filter to Target Year
+    demo = demographic_updates_df[demographic_updates_df["year"] == target_year].copy()
+    enrol = enrolment_df[enrolment_df["year"] == target_year].copy()
     
-    # Calculate time range per Aadhaar
-    velocity = df.groupby("aadhaar_number").agg({
-        date_column: ["min", "max", "count"]
-    })
-    velocity.columns = ["first_update", "last_update", "update_count"]
-    velocity = velocity.reset_index()
+    if len(demo) == 0 or len(enrol) == 0:
+        logger.warning("Missing data for DUV computation.")
+        return DUVResult(pd.DataFrame(), {"error": "no_data"})
     
-    # Calculate time span
-    velocity["time_span_days"] = (
-        velocity["last_update"] - velocity["first_update"]
-    ).dt.days + 1  # Add 1 to include both endpoints
+    # 2. Aggregate to Match Level (if data is finer per input)
+    # Demographic updates usually contain specific components
+    # We need Address + Mobile.
+    # The schema defines 'demo_age_5_17' and 'demo_age_17_', but raw data
+    # technically aggregates all demographic updates.
+    # In this dataset, we treat 'total_demo_updates' as the sum of relevant activities.
     
-    # Calculate velocity (updates per year)
-    velocity["duv"] = (
-        velocity["update_count"] / velocity["time_span_days"]
-    ) * 365
-    
-    # Handle single updates (set to normalized count)
-    velocity.loc[velocity["time_span_days"] == 1, "duv"] = velocity["update_count"]
-    
-    return velocity
+    # Helper to aggregate
+    def agg_df(df, cols, metric_col):
+        # Only sum if column exists
+        if metric_col not in df.columns:
+            # Fallback sum of numeric columns if precise metric missing
+            num_cols = df.select_dtypes(include=np.number).columns
+            cols_to_sum = [c for c in num_cols if c not in cols + ["year"]]
+            return df.groupby(cols, as_index=False)[cols_to_sum].sum()
+        return df.groupby(cols, as_index=False)[metric_col].sum()
 
-
-def compute_acceleration(
-    updates_df: pd.DataFrame,
-    date_column: str = "update_date"
-) -> pd.DataFrame:
-    """
-    Compute update acceleration (change in velocity over time).
+    demo_agg = agg_df(demo, match_levels, "total_demo_updates")
+    enrol_agg = agg_df(enrol, match_levels, "total_enrolments")
     
-    Parameters
-    ----------
-    updates_df : pd.DataFrame
-        Updates data.
-    date_column : str
-        Name of the date column.
+    # Ensure column names are standardized after aggregation
+    if "total_demo_updates" not in demo_agg.columns:
+        # Sum age splits if total missing
+        demo_agg["total_demo_updates"] = (
+            demo_agg.get("demo_age_5_17", 0) + demo_agg.get("demo_age_17_", 0)
+        )
         
-    Returns
-    -------
-    pd.DataFrame
-        Acceleration metrics per Aadhaar number.
-    """
-    df = updates_df.copy()
-    df = df.sort_values([date_column])
+    # 3. Merge Datasets
+    merged = pd.merge(demo_agg, enrol_agg, on=match_levels, how="inner")
     
-    # Calculate inter-update intervals
-    df["prev_update"] = df.groupby("aadhaar_number")[date_column].shift(1)
-    df["interval_days"] = (df[date_column] - df["prev_update"]).dt.days
+    # 4. Compute DUV
+    # DUV = Updates / Enrolments
     
-    # Calculate acceleration per Aadhaar
-    acceleration = df.groupby("aadhaar_number").agg({
-        "interval_days": ["mean", "std", lambda x: x.diff().mean()]
-    })
-    acceleration.columns = ["mean_interval", "std_interval", "acceleration"]
-    acceleration = acceleration.reset_index()
+    # Safe division: valid if enrolment > threshold
+    merged["valid_base"] = merged["total_enrolments"] >= MIN_POPULATION_THRESHOLD
     
-    # Negative acceleration = intervals getting smaller = speeding up
-    acceleration["acceleration"] = -acceleration["acceleration"].fillna(0)
+    merged["duv_score"] = np.where(
+        merged["valid_base"],
+        merged["total_demo_updates"] / merged["total_enrolments"],
+        np.nan # Insufficient base population
+    )
     
-    return acceleration
-
-
-def compute_rolling_velocity(
-    updates_df: pd.DataFrame,
-    date_column: str = "update_date",
-    window: str = "30D"
-) -> pd.DataFrame:
-    """
-    Compute rolling velocity over time.
+    # Fill NaN DUV with 0 if updates are 0 but base is valid
+    # (np.where handles the division, but if updates is 0/Enrolments, it's 0)
+    # The np.nan above handles small populations to avoid noise.
     
-    Parameters
-    ----------
-    updates_df : pd.DataFrame
-        Updates data.
-    date_column : str
-        Name of the date column.
-    window : str
-        Rolling window size (e.g., '30D', '7D').
-        
-    Returns
-    -------
-    pd.DataFrame
-        Time series of rolling velocity.
-    """
-    df = updates_df.copy()
-    df = df.set_index(date_column)
+    # 5. Metadata
+    metadata = {
+        "metric": "DUV",
+        "year": target_year,
+        "mean_duv": merged["duv_score"].mean(),
+        "coverage": len(merged)
+    }
     
-    # Count updates per day
-    daily_counts = df.groupby(df.index.date).size()
-    daily_counts = pd.DataFrame({"count": daily_counts})
-    daily_counts.index = pd.to_datetime(daily_counts.index)
+    logger.info(f"DUV Computed. Mean Score: {metadata['mean_duv']:.3f}")
     
-    # Calculate rolling sum
-    daily_counts["rolling_velocity"] = daily_counts["count"].rolling(
-        window=window,
-        min_periods=1
-    ).mean()
-    
-    return daily_counts.reset_index().rename(columns={"index": "date"})
-
-
-def compute_duv_by_modality(
-    biometric_updates: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Compute DUV broken down by biometric modality.
-    
-    Parameters
-    ----------
-    biometric_updates : pd.DataFrame
-        Biometric updates data.
-        
-    Returns
-    -------
-    pd.DataFrame
-        DUV by modality.
-    """
-    if "biometric_modality" not in biometric_updates.columns:
-        logger.warning("No biometric_modality column found")
-        return pd.DataFrame()
-    
-    modality_counts = biometric_updates.groupby(
-        ["aadhaar_number", "biometric_modality"]
-    ).size().unstack(fill_value=0)
-    
-    # Calculate velocities per modality
-    modality_counts = modality_counts.add_suffix("_count")
-    
-    return modality_counts.reset_index()
-
-
-def compute_duv_score(
-    velocity_df: pd.DataFrame,
-    duv_column: str = "duv",
-    optimal_range: Tuple[float, float] = (0.5, 2.0)
-) -> pd.DataFrame:
-    """
-    Convert raw DUV to normalized score.
-    
-    Scores indicate deviation from optimal update velocity.
-    
-    Parameters
-    ----------
-    velocity_df : pd.DataFrame
-        Velocity data.
-    duv_column : str
-        Name of the DUV column.
-    optimal_range : tuple
-        Optimal velocity range (min, max).
-        
-    Returns
-    -------
-    pd.DataFrame
-        DUV with normalized score.
-    """
-    df = velocity_df.copy()
-    
-    lower, upper = optimal_range
-    
-    # Score = 1 if within optimal range, decreases as you move away
-    conditions = [
-        (df[duv_column] >= lower) & (df[duv_column] <= upper),
-        df[duv_column] < lower,
-        df[duv_column] > upper,
-    ]
-    
-    # Score calculations
-    choices = [
-        1.0,  # Optimal range
-        df[duv_column] / lower,  # Below optimal (scale up)
-        upper / df[duv_column],  # Above optimal (scale down)
-    ]
-    
-    df["duv_score"] = np.select(conditions, choices, default=0)
-    df["duv_score"] = df["duv_score"].clip(0, 1)
-    
-    return df
-
-
-def categorize_duv(
-    df: pd.DataFrame,
-    duv_column: str = "duv"
-) -> pd.DataFrame:
-    """
-    Categorize DUV into velocity categories.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        DataFrame with DUV values.
-    duv_column : str
-        Name of the DUV column.
-        
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with DUV category.
-    """
-    df = df.copy()
-    
-    conditions = [
-        df[duv_column] == 0,
-        df[duv_column] < 0.5,
-        df[duv_column] < 2.0,
-        df[duv_column] < 5.0,
-    ]
-    choices = ["DORMANT", "LOW", "NORMAL", "HIGH"]
-    
-    df["duv_category"] = np.select(conditions, choices, default="HYPERACTIVE")
-    
-    return df
+    return DUVResult(merged, metadata)

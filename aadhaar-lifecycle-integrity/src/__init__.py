@@ -18,3 +18,5 @@ from . import loaders
 from . import preprocess
 from . import cohort_alignment
 from . import risk_classification
+from . import duv
+from . import analysis
